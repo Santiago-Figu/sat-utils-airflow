@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:13
+    env_file: ../.env  # Carga todas las variables
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"] # verificación de base de datos
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s  # Tiempo de espera para comprobar
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  webserver:
+    image: apache/airflow:2.7.3
+    env_file: ../.env
+    environment:
+      - DEBUG_MODE=true
+      - POSTGRES_USER=${POSTGRES_USER}
+    entrypoint: >
+      bash -c "
+      if [ $$_AIRFLOW_DB_INIT_FLAG = 'true' ]; then
+        until airflow db check; do sleep 5; done &&
+        airflow db migrate &&
+        airflow connections create-default-connections &&
+        airflow users create --username $$AIRFLOW_ADMIN_USERNAME --password $$AIRFLOW_ADMIN_PASSWORD --firstname $$AIRFLOW_ADMIN_FIRSTNAME --lastname $$AIRFLOW_ADMIN_LASTNAME --role Admin --email $$AIRFLOW_ADMIN_EMAIL || true &&
+        unset _AIRFLOW_DB_INIT_FLAG;
+      fi &&
+      (airflow scheduler &) &&
+      exec airflow webserver
+      "
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure           # Auto-reintento si falla
+
+volumes:
+  postgres_data:
