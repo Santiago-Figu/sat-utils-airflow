@@ -1,0 +1,12 @@
+[
+    {
+        "dag_id": "dag_ventas_este",
+        "schedule": "0 8 * * 1-5",
+        "parametros": {"region": "este", "umbral": 5000}
+    },
+    {
+        "dag_id": "dag_ventas_oeste",
+        "schedule": "0 12 * * 1-5",
+        "parametros": {"region": "oeste", "umbral": 3000}
+    }
+]

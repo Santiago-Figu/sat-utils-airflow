@@ -19,6 +19,7 @@ services:
     environment:
       - DEBUG_MODE=true
       - POSTGRES_USER=${POSTGRES_USER}
+      - PYTHONPATH=/opt/airflow:${PYTHONPATH}
     entrypoint: >
       bash -c "
       if [ $$_AIRFLOW_DB_INIT_FLAG = 'true' ]; then
