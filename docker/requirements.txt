@@ -1,0 +1,20 @@
+# Dependencias principales de Airflow (ya incluidas en la imagen, no es necesario instalarlas)
+# ---
+apache-airflow==2.10.5
+
+# Proveedores de Airflow (solo los que usas)
+apache-airflow-providers-http==5.2.1
+apache-airflow-providers-sqlite==4.0.1
+apache-airflow-providers-ftp==3.12.3
+
+# Librerías para conexiones y procesamiento
+aiohttp==3.11.14
+aiosqlite==0.21.0
+requests==2.32.3
+pandas==2.2.3
+lxml==5.3.1
+
+# Utilidades adicionales (si las necesitas)
+python-dateutil==2.9.0.post0
+pendulum==3.0.0
+cryptography==44.0.2

@@ -1,6 +1,0 @@
-zeep>=4.2.1
-cryptography>=42.0.4
-pandas>=2.0.0  # Opcional
-apache-airflow-providers-http>=2.1.0  # Para conexiones HTTP (opcional)
-logging==0.4.9.6
-colorlog==6.9.0

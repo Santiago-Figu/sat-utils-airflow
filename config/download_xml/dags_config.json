@@ -1,0 +1,18 @@
+[
+    {
+        "dag_id": "sat_download_invoices",
+        "type": "sat_download",
+        "schedule": "0 12 * * 1-5",
+        "parametros": {"region": "este", "umbral": 5000},
+        "sat_rfcs": [
+            {
+                "rfc": "EWE1709045U0",
+                "password": "contraseña1"
+            },
+            {
+                "rfc": "FIGS901021ID8",
+                "password": "contraseña2"
+            }
+        ]
+    }
+]

@@ -14,7 +14,8 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   webserver:
-    image: apache/airflow:2.7.3
+    # image: apache/airflow:2.8.1
+    build: .
     env_file: ../.env
     environment:
       - DEBUG_MODE=true
@@ -37,6 +38,8 @@ services:
       - ../logs:/opt/airflow/logs
       - ../config:/opt/airflow/config
       - ../sat_utils:/opt/airflow/sat_utils
+      - ../testing:/opt/airflow/testing
+      - ../temp:/opt/airflow/temp # solo para testing
     ports:
       - "8080:8080"
     depends_on:
