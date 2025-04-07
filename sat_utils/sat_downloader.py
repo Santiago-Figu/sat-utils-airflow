@@ -46,8 +46,11 @@ class SATDownloader:
             verify=verify
         )
 
+
         if not response.ok:
-            raise ResponseError(response)
+            mensaje = f"No fue posible generar el token de autentificación, status_code:{response.status_code} - response:{response}"
+            logger.error(mensaje)
+            raise ResponseError(mensaje)
 
         return etree.fromstring(
             response.content,
@@ -67,6 +70,7 @@ class SATDownloader:
             logger.info(f"✓ FIEL cargada correctamente (RFC del Certificado: {signer.rfc})")
         except Exception as e:
             mensaje = f"Ocurrio un error al cargar la FIEL: {e}"
+            logger.error(mensaje)
             raise Exception(mensaje)
 
         logger.info("Autenticando con SAT...")
@@ -89,6 +93,7 @@ class SATDownloader:
         needs_token_fn = None  # No necesitas token para autenticación inicial
         verify = True  # Cambiar a False solo para desarrollo/testing
 
+        
         # Enviar la solicitud SOAP
         response = self.send_soap_request(
             soap_url=soap_url,
@@ -98,26 +103,24 @@ class SATDownloader:
             verify=verify
         )
 
-        # Procesar la respuesta
-        result = auth_request.process_response(response)
-        logger.info("\n✅ Autenticación exitosa!")
-        logger.info(f"Token: {result['AutenticaResult']}")
-        logger.info(f"Válido desde: {result['Created']}")
-        logger.info(f"Válido hasta: {result['Expires']}")
-        return result
+        try:
+            # Procesar la respuesta
+            result = auth_request.process_response(response)
+            logger.info("\n✅ Autenticación exitosa!")
+            logger.info(f"Token: {result['AutenticaResult']}")
+            logger.info(f"Válido desde: {result['Created']}")
+            logger.info(f"Válido hasta: {result['Expires']}")
+            return result
+        except Exception as e:
+            mensaje = f"No fue posible procesar la respuesta, error:{e}, data_response:{response}"
+            logger.error(mensaje)
+            raise Exception(mensaje)
 
-# def mass_download_sat_invoices(rfc, password, credentials_dir, output_dir, days_to_download=7):
-#     """Función principal para descargar facturas del SAT mediante el servicio de Descarga masiva"""
-#     downloader = SATDownloader(
-#         rfc=rfc,
-#         password=password,
-#         credentials_dir=credentials_dir,
-#         output_dir=output_dir
-#     )
+
     
     
 if __name__ == "__main__":
-    rfc = "EWE1709045U0"
+    rfc = "EWE1709045U"
     # rfc = "FIGS901021ID8"
     try:
         sat_downloader = SATDownloader(
@@ -128,5 +131,5 @@ if __name__ == "__main__":
         )
 
         data_login_sat = sat_downloader._login_sat()
-    except Exception as e:
-        logger.error(e)
+    except Exception:
+        pass
