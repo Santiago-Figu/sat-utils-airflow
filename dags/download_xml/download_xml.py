@@ -2,15 +2,16 @@ from datetime import datetime, timedelta
 import json
 import os
 from airflow.decorators import dag, task
-from airflow.utils.dates import days_ago
-from airflow.utils.context import Context  # Para el tipo
 from airflow.operators.python import get_current_context  # Para la función
 from typing import Dict, Any
 from pathlib import Path
 from airflow.exceptions import AirflowException
 from airflow.utils.trigger_rule import TriggerRule
+from airflow.models import DagModel
+from airflow import settings
 from airflow.utils.email import send_email
 import requests
+from sqlalchemy.exc import SQLAlchemyError
 
 from sat_utils.sat_downloader import SATDownloader
 
@@ -18,14 +19,20 @@ from config.log.logger import Logger as LogConfig
 
 logger = LogConfig(file_name="download_xml").get_logger()
 
-# Configuración de rutas usando pathlib (más robusto)
-PATH_CONFIG = Path(__file__).parent.parent.parent / "config" / "download_xml" / "dags_config.json"
+logger.debug(f"Archivo DAG cargado: {__file__} a las {datetime.now()}")
+
+# Configuración de rutas usando pathlib
 SAT_CREDENTIALS_DIR = Path(__file__).parent.parent / "temp" / "sat_credentials"
 XML_OUTPUT_DIR = Path(__file__).parent.parent / "temp" / "xml"
 
 # Cargar configuración
-with open(PATH_CONFIG) as f:
-    configs = json.load(f)
+# ToDo: moverlo a utils y que reciba el path a cargar, posteriormente esto sera remplazado por la lectura de bucket o base de datos
+def load_config():
+    config_path = Path(__file__).parent.parent.parent / "config" / "download_xml" / "dags_config.json"
+    with open(config_path) as f:
+        return json.load(f)
+    
+configs = load_config()
 
 def validate_token_response(response: Dict[str, Any]) -> bool:
     """Valida que la respuesta del token SAT sea correcta
@@ -92,23 +99,25 @@ def send_failure_notification(context, rfc):
     except Exception as email_error:
         logger.error(f"Error al enviar correo: {email_error}")
 
-def create_sat_download_dag(config, id, rfc: str, tags: list = ["Descarga Masiva"]):
-    """Función que define y retorna un DAG (sin registrarlo aún)"""
+def create_sat_download_dag(config, dag_id, rfc: str, tags: list = ["Descarga Masiva"]):
+    """Función que define y retorna un DAG"""
     @dag(
-        dag_id=id,
+        dag_id=dag_id,
         schedule=config["schedule"],
         start_date=datetime(2023, 1, 1),
         tags=tags,
         catchup=False,
         default_args={
-            'retries': 10,  # Número máximo de reintentos
-            'retry_delay': timedelta(minutes=1),  # Espera 1 minuto entre reintentos
-            'retry_exponential_backoff': True,  # Backoff exponencial para evitar saturación
-            'max_retry_delay': timedelta(minutes=5),  # Límite máximo de espera
-            'execution_timeout': timedelta(minutes=10),  # Timeout para cada ejecución
+            'owner': 'airflow',
+            'depends_on_past': False,
+            'retries': 10,
+            'retry_delay': timedelta(minutes=1),
+            'retry_exponential_backoff': True,
+            'max_retry_delay': timedelta(minutes=5),
+            'execution_timeout': timedelta(minutes=10),
         }
     )
-    def dag_template():
+    def generated_dag():
         # Variable para implementar Circuit Breaker pattern
         circuit_breaker_active = False
         
@@ -150,11 +159,11 @@ def create_sat_download_dag(config, id, rfc: str, tags: list = ["Descarga Masiva
                 raise AirflowException(f"Error al generar token: {str(e)}")
 
         @task
-        def generar_key(data: Dict[str, Any]):
+        def generar_key(data: Dict[str, Any], rfc:str):
             if not validate_token_response(data):
                 raise AirflowException("Token inválido recibido para procesar")
                 
-            logger.info(f"Token generado correctamente: {data['AutenticaResult']}")
+            logger.info(f"Token generado correctamente para {rfc}: {data['AutenticaResult']}")
             logger.info(f"Válido desde: {data['Created']}")
             logger.info(f"Válido hasta: {data['Expires']}")
             
@@ -196,7 +205,7 @@ def create_sat_download_dag(config, id, rfc: str, tags: list = ["Descarga Masiva
 
         # Configuración del flujo con manejo de errores
         data_login_sat = log_sat(rfc)
-        processed_data = generar_key(data_login_sat)
+        processed_data = generar_key(data_login_sat, rfc)
         error_handler = handle_failure()
         
         # Establecemos las dependencias
@@ -204,14 +213,56 @@ def create_sat_download_dag(config, id, rfc: str, tags: list = ["Descarga Masiva
         data_login_sat >> error_handler
         processed_data >> error_handler
 
-    return dag_template()
+    return generated_dag()
 
-# Registrar DAGs dinámicamente
-for config in configs:
-    if config.get("type") == "sat_download":
-        for cliente in config["sat_rfcs"]:
-            tags = ["Descarga Masiva"]
-            tags.append(cliente["rfc"])
-            dag_id = str(config["dag_id"]) + "_" + str(cliente["rfc"])
-            rfc = cliente["rfc"]
-            globals()[dag_id] = create_sat_download_dag(config, dag_id, rfc, tags)
+def register_dags_safely():
+    """Registra DAGs verificando contra la base de datos para evitar duplicidad"""
+    logger.debug("Iniciando registro seguro de DAGs")
+    
+    try:
+        configs = load_config()
+        session = settings.Session()
+        
+        # 1. Obtener DAGs existentes en la base de datos
+        existing_dags = {dag.dag_id for dag in session.query(DagModel.dag_id).all()}
+        
+        # 2. Registrar DAGs en globals() siempre, pero solo crear en DB si no existen
+        registered_dags = []
+        
+        for config in configs:
+            if config.get("type") == "sat_download":
+                for cliente in config["sat_rfcs"]:
+                    dag_id = f"{config['dag_id']}_{cliente['rfc']}"
+                    tags = ["Descarga Masiva", cliente["rfc"]]
+                    
+                    # Siempre crear el objeto DAG en globals()
+                    dag_instance = create_sat_download_dag(
+                        config, 
+                        dag_id, 
+                        cliente["rfc"], 
+                        tags
+                    )
+                    
+                    if dag_id not in globals():
+                        logger.debug(f"registrando dag {dag_id} en globals")
+                        globals()[dag_id] = dag_instance
+                    
+                    if dag_id not in existing_dags:
+                        logger.info(f"Nuevo DAG creado: {dag_id}")
+                    else:
+                        logger.debug(f"DAG existente cargado: {dag_id}")
+        
+        logger.debug(f"DAGs registrados correctamente: {', '.join(registered_dags)}")
+        
+    except SQLAlchemyError as e:
+        logger.error(f"Error de base de datos al registrar DAGs: {str(e)}")
+        raise
+    except Exception as e:
+        logger.error(f"Error inesperado al registrar DAGs: {str(e)}")
+        raise
+    finally:
+        session.close()
+        logger.debug("Sesión de base de datos cerrada")
+
+# Registrar los DAGs
+register_dags_safely()
