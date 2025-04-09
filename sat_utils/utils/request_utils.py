@@ -33,7 +33,7 @@ def construir_parametros_sat(
         RfcACuentaTerceros: RFC a cuenta de terceros
         Complemento: Complemento de CFDI a descargar
         UUID: Folio Fiscal para consulta específica
-        RfcFIEL: RFC contenido en la FIEL (para usar como RfcReceptor por defecto)
+        RfcFIEL: RFC contenido en la FIEL (para usar como RfcEmisor por defecto)
 
     Returns:
         dict: Diccionario con los parámetros validados para la consulta al SAT
