@@ -7,11 +7,17 @@
         "sat_rfcs": [
             {
                 "rfc": "EWE1709045U0",
-                "password": "contraseña1"
+                "password": "contraseña1",
+                "fecha_inicial": "2023-05-01",
+                "fecha_final":"2023-05-15",
+                "tipo_solicitud": "CFDI"
             },
             {
                 "rfc": "FIGS901021ID8",
-                "password": "contraseña2"
+                "password": "contraseña2",
+                "fecha_inicial": "2023-04-01",
+                "fecha_final":"2023-04-15",
+                "tipo_solicitud": "CFDI"
             }
         ]
     }

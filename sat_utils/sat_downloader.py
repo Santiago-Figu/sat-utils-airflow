@@ -1,22 +1,19 @@
 import os
 from pathlib import Path
 import sys
+import time
 import requests
 from lxml import etree
-# Agregar la ruta del proyecto a sys.path para ejecución en local
-
+# sys.path para ejecución en local
 sys.path.append(str(Path(__file__).parent.parent))
-
 from sat_utils.models.evento_solicitud_descarga import EventosSolicitudDescarga
 from sat_utils.utils.request_utils import construir_parametros_sat
-from sat_utils.utils.utils import save_to_file
-from sat_utils.satcfdi.pacs.sat import _CFDIAutenticacion, _CFDISolicitaDescarga, _CFDIVerificaSolicitudDescarga
+from sat_utils.utils.utils import check_Expires, save_to_file, save_zip_from_base64
+from sat_utils.satcfdi.pacs.sat import _CFDIAutenticacion, _CFDIDescargaMasiva, _CFDISolicitaDescarga, _CFDIVerificaSolicitudDescarga, EstadoSolicitud
 from sat_utils.satcfdi.models.signer import Signer
 from sat_utils.satcfdi.utils import iterate, parser
 from sat_utils.satcfdi.exceptions import ResponseError
 from config.log.logger import Logger
-
-# from bs4 import BeautifulSoup
 
 logger = Logger(file_name="sat_downloader", debug= True).get_logger()
 
@@ -76,11 +73,24 @@ class SATDownloader:
         )
 
     def _login_sat(self):
-
+        #Nota: repetir la carga en cada parte, ya que parece que en ejecución con Airflow, no se guarda el valor del signer en la clase por alguna razon
+        logger.info("Cargando FIEL...")
+        try:
+            signer = Signer.load(
+                certificate=open(self.path_certificate, 'rb').read(),
+                key=open(self.path_key, 'rb').read(),
+                password=open(self.path_password, 'r').read()
+            )
+            logger.info(f"✓ FIEL cargada correctamente (RFC del Certificado: {str(signer.rfc)[:4]})")
+        except Exception as e:
+            mensaje = f"Ocurrio un error al cargar la FIEL: {e}"
+            logger.error(mensaje)
+            raise Exception(mensaje)
+        
         logger.info("Autenticando con SAT...")
          # Crear la instancia de autenticación
         auth_request = _CFDIAutenticacion(
-            signer=self.signer,
+            signer=signer,
             arguments={
                 "seconds": 300  # 5 minutos de validez
             }
@@ -120,7 +130,7 @@ class SATDownloader:
             logger.error(mensaje)
             raise Exception(mensaje)
 
-    def _solicitar_descarga(self, token_auth:str):
+    def _solicitar_descarga(self, token_auth:str, FechaInicial: str ="2023-04-01", FechaFinal:str ="2023-04-30",TipoSolicitud: str ="CFDI"):
 
         """
         Arguments:
@@ -140,6 +150,18 @@ class SATDownloader:
         """
 
         logger.info("Cargando FIEL...")
+        try:
+            signer = Signer.load(
+                certificate=open(self.path_certificate, 'rb').read(),
+                key=open(self.path_key, 'rb').read(),
+                password=open(self.path_password, 'r').read()
+            )
+            logger.info(f"✓ FIEL cargada correctamente (RFC del Certificado: {str(signer.rfc)[:4]})")
+        except Exception as e:
+            mensaje = f"Ocurrio un error al cargar la FIEL: {e}"
+            logger.error(mensaje)
+            raise Exception(mensaje)
+        
         id_solicitud = None
         try:
             logger.info(f" Preparando argumentos de consulta")
@@ -148,11 +170,11 @@ class SATDownloader:
             #  o recibirlos desde la función
 
             argumments = construir_parametros_sat(
-                RfcSolicitante = str(self.signer.rfc),
-                FechaInicial="2023-03-01",
-                FechaFinal="2023-03-30",
-                RfcReceptor=str(self.signer.rfc),
-                TipoSolicitud="CFDI",
+                RfcSolicitante = str(signer.rfc),
+                FechaInicial = FechaInicial,
+                FechaFinal = FechaFinal,
+                RfcReceptor = str(signer.rfc),
+                TipoSolicitud = TipoSolicitud,
                 RfcFIEL= None
             )
 
@@ -161,7 +183,7 @@ class SATDownloader:
             logger.info("Generando auth con SAT...")
             # Crear la instancia para descarga
             download_request = _CFDISolicitaDescarga(
-                signer=self.signer,
+                signer=signer,
                 arguments=argumments
             )
 
@@ -213,48 +235,135 @@ class SATDownloader:
             return id_solicitud
         
     def _recover_comprobante_status(self, token_auth:str, id_solicitud: str = "6e7b8a81-8da1-4116-8d40-157d7f9f67ad"):
-        logger.info(f" Preparando argumentos para consulta de status de solicitud")
-        arguments={
-            'RfcSolicitante': self.signer.rfc,
-            'IdSolicitud': id_solicitud,
-        }
-        # Crear la instancia para descarga
-        status_request = _CFDIVerificaSolicitudDescarga(
-            signer=self.signer,
-            arguments=arguments
+        logger.info(f"Preparando argumentos para consulta de status de solicitud")
+        try: 
+            logger.info("Cargando FIEL...")
+            try:
+                signer = Signer.load(
+                    certificate=open(self.path_certificate, 'rb').read(),
+                    key=open(self.path_key, 'rb').read(),
+                    password=open(self.path_password, 'r').read()
+                )
+                logger.info(f"✓ FIEL cargada correctamente (RFC del Certificado: {str(signer.rfc)[:4]})")
+            except Exception as e:
+                mensaje = f"Ocurrio un error al cargar la FIEL: {e}"
+                logger.error(mensaje)
+                raise Exception(mensaje)
+
+            arguments={
+                'RfcSolicitante': signer.rfc,
+                'IdSolicitud': id_solicitud,
+            }
+            # Crear la instancia para descarga
+            status_request = _CFDIVerificaSolicitudDescarga(
+                signer=signer,
+                arguments=arguments
+            )
+
+            # Obtener el payload SOAP
+            soap_envelope = status_request.get_payload()
+            logger.info(f"[{signer.rfc}] SOAP Envelope check status generado:")
+            save_to_file(xml_content=soap_envelope.decode('utf-8'), filename="soap_request_status.xml")
+
+            logger.info(f"[{signer.rfc}] Enviando petición SOAP check status de petición")
+            # Configurar parámetros para send_soap_request
+            soap_url = status_request.soap_url
+            soap_action = status_request.soap_action
+            needs_token_fn = token_auth  # Token obtenido del login
+            verify = True  # Cambiar a False solo para desarrollo/testing
+
+            result = None
+            # Enviar la solicitud SOAP
+            response = self.send_soap_request(
+                soap_url=soap_url,
+                data=soap_envelope,
+                soap_action=soap_action,
+                needs_token_fn=needs_token_fn,
+                verify=verify
+            )
+            result = status_request.process_response(response)
+            # ejemplo de respuesta del SAT
+            #  response: {'IdsPaquetes': ['6E7B8A81-8DA1-4116-8D40-157D7F9F67AD_01'], 
+            # 'CodEstatus': '5000', 'EstadoSolicitud': 3, 'CodigoEstadoSolicitud': '5000', 'NumeroCFDIs': 7, 'Mensaje': 'Solicitud Aceptada'}
+            logger.debug(f"[{signer.rfc}] response: {result}")
+            if int(result['CodEstatus']) == 5000:
+                logger.info(f"\n[{signer.rfc}] ✅ Solicitud de status de descarga realizada correctamente!")
+                logger.debug(f"[{signer.rfc}] VerificaSolicitudDescargaResult: {result}")
+            else:
+                logger.error(f"[{signer.rfc}] No fue posible realizar la solicitud de descarga")
+        except Exception as e:
+            logger.error(f'[{signer.rfc}] Ocurrio un error inesperado al realizar la petión SOAP Error: {e} - result value:{result}')
+            result = None
+        finally:
+            return result
+        
+
+    def _recover_comprobante_download(self, id_paquete: str, token_auth: str):
+
+        logger.info("Cargando FIEL...")
+        try:
+            signer = Signer.load(
+                certificate=open(self.path_certificate, 'rb').read(),
+                key=open(self.path_key, 'rb').read(),
+                password=open(self.path_password, 'r').read()
+            )
+            logger.info(f"✓ FIEL cargada correctamente (RFC del Certificado: {str(signer.rfc)[:4]})")
+        except Exception as e:
+            mensaje = f"Ocurrio un error al cargar la FIEL: {e}"
+            logger.error(mensaje)
+            raise Exception(mensaje)
+
+        logger.debug(f"[{signer.rfc}] Descargando paquete {id_paquete}")
+
+        logger.info(f"[{signer.rfc}] Preparando argumentos para consulta de status de solicitud")
+        
+        download_request = _CFDIDescargaMasiva(
+            signer=signer,
+            arguments={
+                'RfcSolicitante': signer.rfc,
+                'IdPaquete': id_paquete,
+            }
         )
 
         # Obtener el payload SOAP
-        soap_envelope = status_request.get_payload()
-        logger.info("SOAP Envelope check status generado:")
-        save_to_file(xml_content=soap_envelope.decode('utf-8'), filename="soap_request_status.xml")
+        soap_envelope = download_request.get_payload()
+        logger.info(f"[{signer.rfc}] SOAP Envelope check status generado:")
+        save_to_file(xml_content=soap_envelope.decode('utf-8'), filename="soap_request_download.xml")
 
-        logger.info("Enviando petición SOAP check status de petición")
+
+        logger.info(f"[{signer.rfc}] Enviando petición SOAP check status de petición")
         # Configurar parámetros para send_soap_request
-        soap_url = status_request.soap_url
-        soap_action = status_request.soap_action
+        soap_url = download_request.soap_url
+        soap_action = download_request.soap_action
         needs_token_fn = token_auth  # Token obtenido del login
         verify = True  # Cambiar a False solo para desarrollo/testing
-
-        # Enviar la solicitud SOAP
-        response = self.send_soap_request(
-            soap_url=soap_url,
-            data=soap_envelope,
-            soap_action=soap_action,
-            needs_token_fn=needs_token_fn,
-            verify=verify
-        )
-        result = status_request.process_response(response)
-        #  response: {'IdsPaquetes': ['6E7B8A81-8DA1-4116-8D40-157D7F9F67AD_01'], 
-        # 'CodEstatus': '5000', 'EstadoSolicitud': 3, 'CodigoEstadoSolicitud': '5000', 'NumeroCFDIs': 7, 'Mensaje': 'Solicitud Aceptada'}
-        logger.info(f"response: {result}")
-        if int(result['CodEstatus']) == 5000:
-            logger.info("\n✅ Solicitud de status de descarga realizada correctamente!")
-
-            logger.debug(f"VerificaSolicitudDescargaResult: {result['EstadoSolicitud']}")
-        else:
-            logger.error(f"No fue posible realizar la solicitud de descarga")
         
+        result = None
+        try: 
+            # Enviar la solicitud SOAP
+            response = self.send_soap_request(
+                soap_url=soap_url,
+                data=soap_envelope,
+                soap_action=soap_action,
+                needs_token_fn=needs_token_fn,
+                verify=verify
+            )
+            result, paquete = download_request.process_response(response)
+            logger.debug(f"[{signer.rfc}] response: {result}")
+            if int(result['CodEstatus']) == 5000:
+                logger.info(f"\n[{signer.rfc}] ✅ Paquete descargado correctamente!")
+                logger.debug(f"[{signer.rfc}] DescargaResult: {result}")
+                # logger.debug(f"paquete {paquete}")
+                #Guardar paquet en .zip
+                save_zip_from_base64(base64_content=paquete, filename=f"{id_paquete}.zip", carpeta="cfdi")
+
+            else:
+                logger.error(f"[{signer.rfc}] No fue posible realizar la descarga del paquete")
+        except Exception as e:
+            logger.error(f'[{signer.rfc}] Ocurrio un error inesperado al realizar la petión SOAP Error: {e} - result value:{result}')
+            result = None
+        finally:
+            return result
     
     
 if __name__ == "__main__":
@@ -268,20 +377,59 @@ if __name__ == "__main__":
             key_file = f'{rfc}.key',
             password_file = f'password.txt',
         )
-
-        sat_downloader._create_signer()
         
         data_login_sat = sat_downloader._login_sat()
         
         #almacenar id de solicitud para realizar la descarga posteriormente
         # id_solicitud = sat_downloader._solicitar_descarga(token_auth=data_login_sat['AutenticaResult'])
 
-        id_solicitud = "6e7b8a81-8da1-4116-8d40-157d7f9f67ad"
-        
-        # id_solicitud = None
+        # id_solicitud = "6e7b8a81-8da1-4116-8d40-157d7f9f67ad"
+        id_solicitud = "303f2187-d4a5-49d9-a1be-b0c264d7deef"
         if id_solicitud:
-            logger.debug(f"id_solicitud:{id_solicitud}")
-            sat_downloader._recover_comprobante_status(token_auth=data_login_sat['AutenticaResult'],id_solicitud=id_solicitud)
+            notFinished = True
+            i = 3
+            while notFinished:
+                logger.debug(f"id_solicitud:{id_solicitud}")
+                if check_Expires(str(data_login_sat['Expires'])):
+                    logger.warning(f"[{sat_downloader.rfc}] Token expirado, renovando...")
+                    data_login_sat = sat_downloader._login_sat()
+                else:
+                    logger.debug(f"[{sat_downloader.rfc}] El token sigue vigente")
+                data_status = sat_downloader._recover_comprobante_status(token_auth=data_login_sat['AutenticaResult'],id_solicitud=id_solicitud)
+                if data_status:
+                    # ejemplo de respuesta del SAT
+                    #  response: {'IdsPaquetes': ['6E7B8A81-8DA1-4116-8D40-157D7F9F67AD_01'], 
+                    # 'CodEstatus': '5000', 'EstadoSolicitud': 3, 'CodigoEstadoSolicitud': '5000', 'NumeroCFDIs': 7, 'Mensaje': 'Solicitud Aceptada'}
+                    if data_status['EstadoSolicitud'] == EstadoSolicitud.TERMINADA:
+                        # código para solicitud terminada 3, esto indica que el paquete de descarga de comprobantes se realizo correctamente 
+                        notFinished = False # bandera para salir del ciclo de solicitud de estatus:
+                        #Flujo para realizar descarga de los paquetes de CFDI
+                        logger.debug(f"[{sat_downloader.rfc}] Solicitud procesada correctamente, CFDIs a descargar {data_status['NumeroCFDIs']} en {len(data_status['IdsPaquetes'])} paquetes")
+                        for paquete in data_status['IdsPaquetes']:
+                            #ToDo: verificar caducidad del token, en caso de caducar, volver a generar
+                            data_download= sat_downloader._recover_comprobante_download(id_paquete=paquete,token_auth=data_login_sat['AutenticaResult'])
+                    elif data_status['EstadoSolicitud'] in [EstadoSolicitud.ACEPTADA, EstadoSolicitud.EN_PROCESO]:
+                        # Generar el sleep para reintentar la nueva solicitud
+                        # Todo, considerar una estrategia de reintentos para no saturar el sistema, podría ser un un incremento del Sleep pasados ciertos intentos
+                        logger.debug(f"[{sat_downloader.rfc}] La solicitud aun no ha sido procesada por el SAT, reintentando solicitud en {sat_downloader.wait_time} segundos, estado de la solicitud {data_status['EstadoSolicitud']}")
+                        time.sleep(sat_downloader.wait_time)
+                        i+=1
+                        continue
+                    elif data_status['EstadoSolicitud'] == EstadoSolicitud.RECHAZADA:
+                        logger.debug(f"[{sat_downloader.rfc}] La solicitud de descarga fue rechazada, verifique los datos")
+                        break
+                    elif data_status['EstadoSolicitud'] == EstadoSolicitud.VENCIDA:
+                        logger.debug(f"[{sat_downloader.rfc}] La solicitud de descarga ha vencido, volver a generar la petición")
+                        break
+                    elif data_status['EstadoSolicitud'] == EstadoSolicitud.ERROR:
+                        logger.debug(f"[{sat_downloader.rfc}] La solicitud de descarga ha generado un error, verificar los datos")
+                        break
+                    else:
+                        logger.error(f"Estado de solicitud no identificado, verificar EstadoSolicitud:{data_status['EstadoSolicitud']}")
+                break
+                # end if
+            # end while
+        # end if
         else:
             logger.error(f"No fue posible generar el id de solicitud: {id_solicitud}")
     except Exception:
